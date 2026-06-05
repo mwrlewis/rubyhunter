@@ -133,4 +133,26 @@ if st.button("Check Availability Now", type="primary"):
                         open_camps.append(f"{camp_info['name']} (Max: {camp_info['max_size']})")
                         
         except Exception as e:
-            st.error(f"API Error: {
+            st.error(f"API Error: {e}")
+
+        # --- Display Results ---
+        st.divider()
+        st.subheader(f"Results for {target_date_str} (Group of {group_size})")
+        
+        # Display Launch Quotas
+        if launch_available:
+            st.success(f"✅ **{remaining_launches}** Launch Permit(s) Available to start a trip!")
+        else:
+            st.error("❌ No Launch Permits available to start a trip on this date.")
+            
+        # Display Campsites
+        st.write("---")
+        if open_camps:
+            st.info(f"🏕️ **{len(open_camps)}** Campsites Available:")
+            for camp in sorted(open_camps):
+                st.write(f"- {camp}")
+        else:
+            if camps_metadata:
+                st.warning("❌ No Camps available for your group size.")
+            else:
+                st.warning("⚠️ Could not load camp list. The API might have blocked the request.")
