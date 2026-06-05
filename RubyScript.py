@@ -13,7 +13,7 @@ HEADERS = {
     "Referer": f"https://www.recreation.gov/permits/{PERMIT_ID}/registration/detailed-availability"
 }
 
-@st.cache_data(ttl=86400) # Caches the rulebook for 24 hours so we don't spam the server
+@st.cache_data(ttl=86400) # Caches the rulebook for 24 hours
 def get_camp_metadata():
     """Fetches the master rulebook for the permit to get camp names and capacities."""
     try:
@@ -22,12 +22,21 @@ def get_camp_metadata():
         data = response.json()
         
         camps = {}
-        # Recreation.gov stores campsite rules under 'divisions'
         divisions = data.get("payload", {}).get("divisions", {})
         
         for div_id, div_info in divisions.items():
-            # Grab the name and max capacity (default to 30 if they left it blank)
-            name = div_info.get("division_name", f"Camp {div_id}")
+            # --- THE AUTO-MAP FIX ---
+            # Hunts through the dictionary for any key that might hold the name
+            name = (
+                div_info.get("name") or 
+                div_info.get("title") or 
+                div_info.get("division_name") or 
+                div_info.get("facility_name") or 
+                div_info.get("description") or
+                f"Camp {div_id}"
+            )
+            
+            # Grab max capacity (default to 30 if blank)
             max_size = div_info.get("max_group_size") or div_info.get("max_capacity") or 30
             camps[div_id] = {"name": name, "max_size": int(max_size)}
             
@@ -37,7 +46,7 @@ def get_camp_metadata():
         return {}
 
 def find_key_in_json(data, target_key):
-    """Recursively digs to find a specific key (like a division ID) and returns its value."""
+    """Recursively digs to find a specific key (like a division ID)."""
     if isinstance(data, dict):
         if target_key in data:
             return data[target_key]
@@ -124,27 +133,4 @@ if st.button("Check Availability Now", type="primary"):
                         open_camps.append(f"{camp_info['name']} (Max: {camp_info['max_size']})")
                         
         except Exception as e:
-            st.error(f"API Error: {e}")
-
-        # --- Display Results ---
-        st.divider()
-        st.subheader(f"Results for {target_date_str} (Group of {group_size})")
-        
-        # Display Launch Quotas
-        if launch_available:
-            st.success(f"✅ **{remaining_launches}** Launch Permit(s) Available to start a trip!")
-        else:
-            st.error("❌ No Launch Permits available to start a trip on this date.")
-            
-        # Display Campsites
-        st.write("---")
-        if open_camps:
-            st.info(f"🏕️ **{len(open_camps)}** Campsites Available:")
-            for camp in sorted(open_camps):
-                st.write(f"- {camp}")
-        else:
-            if camps_metadata:
-                st.warning("❌ No Camps available for your group size.")
-            else:
-                st.warning("⚠️ Could not load camp list. The API might have blocked the request.")
-                
+            st.error(f"API Error: {
