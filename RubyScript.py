@@ -1,6 +1,6 @@
 import requests
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- Configuration ---
 PERMIT_ID = "74466"
@@ -13,7 +13,7 @@ HEADERS = {
     "Referer": f"https://www.recreation.gov/permits/{PERMIT_ID}/registration/detailed-availability"
 }
 
-@st.cache_data(ttl=86400) # Caches the rulebook for 24 hours
+@st.cache_data(ttl=86400)
 def get_camp_metadata():
     """Fetches the master rulebook for the permit to get camp names and capacities."""
     try:
@@ -25,8 +25,6 @@ def get_camp_metadata():
         divisions = data.get("payload", {}).get("divisions", {})
         
         for div_id, div_info in divisions.items():
-            # --- THE AUTO-MAP FIX ---
-            # Hunts through the dictionary for any key that might hold the name
             name = (
                 div_info.get("name") or 
                 div_info.get("title") or 
@@ -35,8 +33,6 @@ def get_camp_metadata():
                 div_info.get("description") or
                 f"Camp {div_id}"
             )
-            
-            # Grab max capacity (default to 30 if blank)
             max_size = div_info.get("max_group_size") or div_info.get("max_capacity") or 30
             camps[div_id] = {"name": name, "max_size": int(max_size)}
             
@@ -78,81 +74,87 @@ def find_date_in_json(data, target):
     return None
 
 # --- Web Interface ---
-st.set_page_config(page_title="River Permit Tracker", page_icon="🛶")
+st.set_page_config(page_title="River Permit Tracker", page_icon="🛶", layout="centered")
 st.title("🛶 River Permit Tracker")
 
-# 1. Load the camp metadata invisibly in the background
 camps_metadata = get_camp_metadata()
 
 # User Inputs
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
-    selected_date = st.date_input("Select Launch Date", value=datetime(2026, 7, 15))
+    selected_date = st.date_input("Launch Date", value=datetime(2026, 7, 15))
 with col2:
-    group_size = st.number_input("Your Group Size", min_value=1, max_value=30, value=4)
+    group_size = st.number_input("Group Size", min_value=1, max_value=30, value=4)
+with col3:
+    trip_nights = st.number_input("Nights on River", min_value=1, max_value=14, value=3)
 
-target_date_str = selected_date.strftime("%Y-%m-%d")
-launch_month_str = selected_date.replace(day=1).strftime("%Y-%m-%dT00:00:00.000Z")
+# Calculate all the dates we need to check
+dates_to_check = [selected_date + timedelta(days=i) for i in range(trip_nights)]
 
-if st.button("Check Availability Now", type="primary"):
+if st.button("Check Multi-Day Availability", type="primary"):
     with st.spinner("Pinging Recreation.gov..."):
-        launch_available = False
-        remaining_launches = 0
-        open_camps = []
         
+        # 1. Figure out which months we need to download (in case the trip crosses into a new month)
+        months_needed = set()
+        for d in dates_to_check:
+            first_of_month = d.replace(day=1).strftime("%Y-%m-%dT00:00:00.000Z")
+            months_needed.add(first_of_month)
+            
+        # 2. Download the data for those months and store it in a dictionary
+        month_data = {}
         try:
-            # 2. Fetch the giant availability data dump for the month
-            params_month = {"start_date": launch_month_str, "commercial_acct": "false", "is_lottery": "false"}
-            response_month = requests.get(MONTH_API_URL, params=params_month, headers=HEADERS)
-            data_month = response_month.json()
+            for m_str in months_needed:
+                params_month = {"start_date": m_str, "commercial_acct": "false", "is_lottery": "false"}
+                res = requests.get(MONTH_API_URL, params=params_month, headers=HEADERS)
+                res.raise_for_status()
+                month_data[m_str] = res.json()
+        except Exception as e:
+            st.error(f"API Error fetching month data: {e}")
+            st.stop()
             
-            # --- A. Check Overall Launch Permits ---
-            availability_folder = data_month.get("payload", {}).get("availability", {})
-            date_data = find_date_in_json(availability_folder, target_date_str)
+        st.divider()
+        st.header(f"Trip Overview: {selected_date.strftime('%b %d, %Y')}")
+        
+        # --- Check Launch Permit (Only matters for Day 1!) ---
+        launch_date_str = dates_to_check[0].strftime("%Y-%m-%d")
+        launch_month_str = dates_to_check[0].replace(day=1).strftime("%Y-%m-%dT00:00:00.000Z")
+        
+        day1_data = month_data.get(launch_month_str, {})
+        availability_folder = day1_data.get("payload", {}).get("availability", {})
+        launch_info = find_date_in_json(availability_folder, launch_date_str)
+        
+        if launch_info and (launch_info.get("available", False) or launch_info.get("remaining", 0) > 0):
+            st.success(f"✅ **{launch_info.get('remaining', 0)} Launch Permit(s)** available to start the trip on {launch_date_str}!")
+        else:
+            st.error(f"❌ **No Launch Permits** available to start a trip on {launch_date_str}.")
+
+        st.write("---")
+        
+        # --- Check Campsites for Every Night ---
+        for i, current_date in enumerate(dates_to_check):
+            date_str = current_date.strftime("%Y-%m-%d")
+            month_str = current_date.replace(day=1).strftime("%Y-%m-%dT00:00:00.000Z")
+            current_month_data = month_data.get(month_str, {})
             
-            if date_data:
-                remaining_launches = date_data.get("remaining", 0)
-                launch_available = date_data.get("available", False) or remaining_launches > 0
-                
-            # --- B. Check Specific Campsites ---
-            # Loop through every camp we found in the rulebook
+            open_camps = []
+            
             for div_id, camp_info in camps_metadata.items():
-                
-                # LOCAL FILTERING: If your group is too big, ignore this camp entirely!
+                # Filter out camps that are too small
                 if group_size > camp_info["max_size"]:
                     continue
                 
-                # Dig through the month data to find this specific camp's ID
-                div_availability_data = find_key_in_json(data_month, div_id)
-                
+                div_availability_data = find_key_in_json(current_month_data, div_id)
                 if div_availability_data:
-                    # Find our specific launch date inside that camp's data
-                    target_date_info = find_date_in_json(div_availability_data, target_date_str)
+                    target_date_info = find_date_in_json(div_availability_data, date_str)
                     
                     if target_date_info and target_date_info.get("remaining", 0) > 0:
                         open_camps.append(f"{camp_info['name']} (Max: {camp_info['max_size']})")
-                        
-        except Exception as e:
-            st.error(f"API Error: {e}")
-
-        # --- Display Results ---
-        st.divider()
-        st.subheader(f"Results for {target_date_str} (Group of {group_size})")
-        
-        # Display Launch Quotas
-        if launch_available:
-            st.success(f"✅ **{remaining_launches}** Launch Permit(s) Available to start a trip!")
-        else:
-            st.error("❌ No Launch Permits available to start a trip on this date.")
             
-        # Display Campsites
-        st.write("---")
-        if open_camps:
-            st.info(f"🏕️ **{len(open_camps)}** Campsites Available:")
-            for camp in sorted(open_camps):
-                st.write(f"- {camp}")
-        else:
-            if camps_metadata:
-                st.warning("❌ No Camps available for your group size.")
+            # Display the results for this specific night
+            st.subheader(f"Night {i+1}: {current_date.strftime('%A, %b %d')}")
+            if open_camps:
+                for camp in sorted(open_camps):
+                    st.write(f"- 🏕️ {camp}")
             else:
-                st.warning("⚠️ Could not load camp list. The API might have blocked the request.")
+                st.warning("No camps available for this group size tonight.")
+            st.write("") # Add a little spacing between days
