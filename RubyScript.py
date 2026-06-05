@@ -1,5 +1,6 @@
 import requests
 import streamlit as st
+import pandas as pd
 from datetime import datetime, timedelta
 
 # --- Configuration ---
@@ -15,7 +16,7 @@ HEADERS = {
 
 @st.cache_data(ttl=86400)
 def get_camp_metadata():
-    """Fetches the master rulebook for the permit to get camp names and capacities."""
+    """Fetches the master rulebook and preserves the downstream sorting order."""
     try:
         response = requests.get(CONTENT_API_URL, headers=HEADERS)
         response.raise_for_status()
@@ -29,12 +30,18 @@ def get_camp_metadata():
                 div_info.get("name") or 
                 div_info.get("title") or 
                 div_info.get("division_name") or 
-                div_info.get("facility_name") or 
-                div_info.get("description") or
                 f"Camp {div_id}"
             )
             max_size = div_info.get("max_group_size") or div_info.get("max_capacity") or 30
-            camps[div_id] = {"name": name, "max_size": int(max_size)}
+            
+            # Recreation.gov uses an 'order' integer to sequence camps downstream
+            downstream_order = div_info.get("order") or div_info.get("display_order") or 999
+            
+            camps[div_id] = {
+                "name": name, 
+                "max_size": int(max_size),
+                "order": int(downstream_order)
+            }
             
         return camps
     except Exception as e:
@@ -74,10 +81,13 @@ def find_date_in_json(data, target):
     return None
 
 # --- Web Interface ---
-st.set_page_config(page_title="River Permit Tracker", page_icon="🛶", layout="centered")
-st.title("🛶 River Permit Tracker")
+st.set_page_config(page_title="River Permit Grid", page_icon="🛶", layout="wide")
+st.title("🛶 River Permit Downstream Grid")
 
 camps_metadata = get_camp_metadata()
+
+# Sort the camps immediately by their downstream order value
+sorted_camp_ids = sorted(camps_metadata.keys(), key=lambda x: camps_metadata[x]["order"])
 
 # User Inputs
 col1, col2, col3 = st.columns(3)
@@ -86,21 +96,16 @@ with col1:
 with col2:
     group_size = st.number_input("Group Size", min_value=1, max_value=30, value=4)
 with col3:
-    trip_nights = st.number_input("Nights on River", min_value=1, max_value=14, value=3)
+    trip_nights = st.number_input("Nights on River", min_value=1, max_value=7, value=3)
 
-# Calculate all the dates we need to check
+# Build out column headers
 dates_to_check = [selected_date + timedelta(days=i) for i in range(trip_nights)]
 
-if st.button("Check Multi-Day Availability", type="primary"):
-    with st.spinner("Pinging Recreation.gov..."):
+if st.button("Generate Downstream Grid", type="primary"):
+    with st.spinner("Building grid from live data..."):
         
-        # 1. Figure out which months we need to download (in case the trip crosses into a new month)
-        months_needed = set()
-        for d in dates_to_check:
-            first_of_month = d.replace(day=1).strftime("%Y-%m-%dT00:00:00.000Z")
-            months_needed.add(first_of_month)
-            
-        # 2. Download the data for those months and store it in a dictionary
+        # Fetch required months
+        months_needed = {d.replace(day=1).strftime("%Y-%m-%dT00:00:00.000Z") for d in dates_to_check}
         month_data = {}
         try:
             for m_str in months_needed:
@@ -109,52 +114,63 @@ if st.button("Check Multi-Day Availability", type="primary"):
                 res.raise_for_status()
                 month_data[m_str] = res.json()
         except Exception as e:
-            st.error(f"API Error fetching month data: {e}")
+            st.error(f"API Error: {e}")
             st.stop()
             
         st.divider()
-        st.header(f"Trip Overview: {selected_date.strftime('%b %d, %Y')}")
         
-        # --- Check Launch Permit (Only matters for Day 1!) ---
+        # --- Launch Permit Check Banner ---
         launch_date_str = dates_to_check[0].strftime("%Y-%m-%d")
         launch_month_str = dates_to_check[0].replace(day=1).strftime("%Y-%m-%dT00:00:00.000Z")
-        
-        day1_data = month_data.get(launch_month_str, {})
-        availability_folder = day1_data.get("payload", {}).get("availability", {})
+        availability_folder = month_data.get(launch_month_str, {}).get("payload", {}).get("availability", {})
         launch_info = find_date_in_json(availability_folder, launch_date_str)
         
         if launch_info and (launch_info.get("available", False) or launch_info.get("remaining", 0) > 0):
-            st.success(f"✅ **{launch_info.get('remaining', 0)} Launch Permit(s)** available to start the trip on {launch_date_str}!")
+            st.success(f"✅ **{launch_info.get('remaining', 0)} Launch Permit(s)** available to start your trip on {launch_date_str}!")
         else:
             st.error(f"❌ **No Launch Permits** available to start a trip on {launch_date_str}.")
 
-        st.write("---")
+        # --- Build Table Matrix ---
+        grid_data = []
+        campsite_row_labels = []
         
-        # --- Check Campsites for Every Night ---
-        for i, current_date in enumerate(dates_to_check):
-            date_str = current_date.strftime("%Y-%m-%d")
-            month_str = current_date.replace(day=1).strftime("%Y-%m-%dT00:00:00.000Z")
-            current_month_data = month_data.get(month_str, {})
+        for div_id in sorted_camp_ids:
+            camp_info = camps_metadata[div_id]
             
-            open_camps = []
+            # If group size is systematically too big for this camp, skip showing the row entirely
+            if group_size > camp_info["max_size"]:
+                continue
+                
+            campsite_row_labels.append(camp_info["name"])
+            row_availabilities = []
             
-            for div_id, camp_info in camps_metadata.items():
-                # Filter out camps that are too small
-                if group_size > camp_info["max_size"]:
-                    continue
+            # Check availability across consecutive nights
+            for i, current_date in enumerate(dates_to_check):
+                date_str = current_date.strftime("%Y-%m-%d")
+                month_str = current_date.replace(day=1).strftime("%Y-%m-%dT00:00:00.000Z")
+                current_month_data = month_data.get(month_str, {})
                 
                 div_availability_data = find_key_in_json(current_month_data, div_id)
+                is_open = False
+                
                 if div_availability_data:
                     target_date_info = find_date_in_json(div_availability_data, date_str)
-                    
                     if target_date_info and target_date_info.get("remaining", 0) > 0:
-                        open_camps.append(f"{camp_info['name']} (Max: {camp_info['max_size']})")
+                        is_open = True
+                        
+                # Recreate the clean look of image_708aba.png using text cues
+                row_availabilities.append("⛺ Available" if is_open else "—")
+                
+            grid_data.append(row_availabilities)
             
-            # Display the results for this specific night
-            st.subheader(f"Night {i+1}: {current_date.strftime('%A, %b %d')}")
-            if open_camps:
-                for camp in sorted(open_camps):
-                    st.write(f"- 🏕️ {camp}")
-            else:
-                st.warning("No camps available for this group size tonight.")
-            st.write("") # Add a little spacing between days
+        # Structure columns beautifully as Night 1 (Date), Night 2 (Date)...
+        column_headers = [f"Night {i+1} ({d.strftime('%b %d')})" for i, d in enumerate(dates_to_check)]
+        
+        if grid_data:
+            df = pd.DataFrame(grid_data, columns=column_headers, index=campsite_row_labels)
+            
+            # Render out the complete grid on screen
+            st.subheader("🗺️ Downstream Camp Grid")
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.warning("No camps match your criteria or metadata failed to parse.")
