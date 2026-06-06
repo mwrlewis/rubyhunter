@@ -25,4 +25,4 @@ jobs:
         pip install requests
 
     - name: Run Tracker Script
-      run: python ruby_automation.py
+      run: python rubynotifier.py
