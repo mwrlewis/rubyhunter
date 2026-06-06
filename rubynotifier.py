@@ -8,7 +8,7 @@ LAUNCH_DATE_STR = "2026-07-15"  # Your target launch date
 GROUP_SIZE = 4                  # Your party size
 TRIP_NIGHTS = 3                 # Number of nights on the river
 
-# NTFY Configuration - Replace 'your_secret_river_topic' with a unique name
+# NTFY Configuration - Replace 'your_secret_river_topic' with your unique topic
 NTFY_TOPIC = "your_secret_river_topic" 
 
 MONTH_API_URL = f"https://www.recreation.gov/api/permits/{PERMIT_ID}/availability/month"
@@ -26,13 +26,16 @@ def send_ntfy_notification(message, title, priority="default"):
     """Sends a push notification to your phone via ntfy.sh"""
     try:
         url = f"https://ntfy.sh/{NTFY_TOPIC}"
+        
+        # Fixed: Encoding the title string to utf-8 prevents the latin-1 codec error
         headers = {
-            "Title": title,
+            "Title": title.encode('utf-8'),
             "Priority": priority,
             "Tags": "canoe,alarm_clock"
         }
         res = requests.post(url, data=message.encode('utf-8'), headers=headers)
         res.raise_for_status()
+        print("Notification sent successfully.")
     except Exception as e:
         print(f"Failed to send ntfy notification: {e}")
 
@@ -84,6 +87,7 @@ def find_date_in_json(data, target):
     return None
 
 def check_river_itinerary():
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Executing workflow check...")
     start_date = datetime.strptime(LAUNCH_DATE_STR, "%Y-%m-%d").date()
     dates_to_check = [start_date + timedelta(days=i) for i in range(TRIP_NIGHTS)]
     
@@ -144,9 +148,7 @@ def check_river_itinerary():
             alert_body += f"• {date_str}: {', '.join(camps[:3])}...\n"
             
         print("PERMIT ITINERARY FOUND! Sending notification.")
-        send_ntfy_notification(alert_body, "🛶 Ruby Permit Found!", priority="high")
+        # Fixed: Text titles are strictly text-only to prevent workflow runtime failure
+        send_ntfy_notification(alert_body, "Ruby Permit Found!", priority="high")
     else:
         print("Checked. Itinerary conditions not fully met.")
-
-if __name__ == "__main__":
-    check_river_itinerary()
